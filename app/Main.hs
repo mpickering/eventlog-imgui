@@ -42,17 +42,25 @@ import qualified System.IO                as IO
 import GHC.Eventlog.Machines
 import GHC.RTS.Events
 
-import Data.Machine        (MachineT, ProcessT, await, repeatedly, runT_, (~>))
+import Data.Machine        (MachineT, ProcessT, await, repeatedly, runT_, (~>), yield, stop, runT, construct)
 import Data.Machine.Fanout (fanout)
 
 import Foreign.C.Types (CFloat)
 import System.Random (randomRIO)
+import Data.Function
 
 -- 'Void' output to help inference.
 fileSink :: Handle -> ProcessT IO (Maybe BS.ByteString) Void
 fileSink hdl = repeatedly $ do
     mbs <- await
     liftIO $ for_ mbs $ BS.hPut hdl
+
+liveBytesM :: ProcessT IO Event Word64
+liveBytesM = construct $ fix $ \r -> do
+  Event _ ei _ <- await <|> stop
+  case ei of
+    HeapLive _ lb -> yield lb >> r
+    _ -> r
 
 -------------------------------------------------------------------------------
 -- connecting & opening
@@ -99,9 +107,6 @@ optsP = do
         O.flag' PathTypeFile (O.long "file" <> O.help "Path is to ordinary file") <|>
         pure PathTypeSocket
 
-
-
-
 main :: IO ()
 main = do
     opts <- O.execParser $ O.info (optsP <**> O.helper) $
@@ -119,10 +124,14 @@ main = do
             ~> reorderEvents 1_000_000_000
             ~> checkOrder (\e e' -> print (e, e'))
 
-    mainWindow
+    lb <- runT (input ~> events ~> liveBytesM)
 
-mainWindow :: IO ()
-mainWindow = do
+    print lb
+
+    mainWindow lb
+
+mainWindow :: [Word64] -> IO ()
+mainWindow lb = do
   -- Initialize SDL
   initializeAll
 
@@ -145,31 +154,17 @@ mainWindow = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop [] window
+    liftIO $ mainLoop (map fromIntegral lb) window
 
 
 mainLoop :: [CFloat] -> Window -> IO ()
-mainLoop nums window = unlessQuit do
+mainLoop lb window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
   newFrame
 
-  -- Build the GUI
-  withWindowOpen "Hello, ImGui!" do
-    -- Add a text widget
-    text "Hello, ImGui!"
-
-    -- Add a button widget, and call 'putStrLn' when it's clicked
-    button "Clickety Click" >>= \case
-      False -> return ()
-      True  -> putStrLn "Ow!"
-
-  -- Show the ImGui demo window
-  showDemoWindow
-
-
-  plotLines "" nums
+  plotLines "" lb
 
   -- Render
   glClear GL_COLOR_BUFFER_BIT
@@ -179,8 +174,7 @@ mainLoop nums window = unlessQuit do
 
   glSwapWindow window
 
-  num <- randomRIO (-10.0, 10.0)
-  mainLoop (num:nums) window
+  mainLoop lb window
 
   where
     -- Process the event loop
