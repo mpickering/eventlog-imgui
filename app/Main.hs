@@ -14,6 +14,9 @@ import DearImGui.SDL.OpenGL
 import Graphics.GL
 import SDL
 
+import Foreign.C.Types (CFloat)
+import System.Random (randomRIO)
+
 main :: IO ()
 main = do
   -- Initialize SDL
@@ -38,11 +41,11 @@ main = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop window
+    liftIO $ mainLoop [] window
 
 
-mainLoop :: Window -> IO ()
-mainLoop window = unlessQuit do
+mainLoop :: [CFloat] -> Window -> IO ()
+mainLoop nums window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
@@ -61,6 +64,9 @@ mainLoop window = unlessQuit do
   -- Show the ImGui demo window
   showDemoWindow
 
+
+  plotLines "" nums
+
   -- Render
   glClear GL_COLOR_BUFFER_BIT
 
@@ -69,7 +75,8 @@ mainLoop window = unlessQuit do
 
   glSwapWindow window
 
-  mainLoop window
+  num <- randomRIO (-10.0, 10.0)
+  mainLoop (num:nums) window
 
   where
     -- Process the event loop
