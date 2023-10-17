@@ -120,8 +120,11 @@ main = do
     let input :: MachineT IO k (Maybe BS.ByteString)
         input = sourceHandleWait hdl 1_000_000 4096
 
+
+    Just header <- head <$> runT (input ~> decodeEventsHeader)
+
     let events :: ProcessT IO (Maybe BS.ByteString) Event
-        events = decodeEventsMaybe
+        events = decodeEventsEvents header
             ~> reorderEvents 1_000_000_000
             ~> checkOrder (\e e' -> print (e, e'))
 
@@ -151,7 +154,7 @@ mainWindow lb = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop (taking 50 <~ lb) window
+    liftIO $ mainLoop (taking 5 <~ lb) window
 
 
 mainLoop :: MachineT IO a Word64  -> Window -> IO ()
@@ -190,15 +193,15 @@ mainLoop mach window = unlessQuit do
       SDL.eventPayload event == SDL.QuitEvent
 
 
-decodeEventsHeader :: MonadIO m => ProcessT m (Maybe BS.ByteString) Header
+decodeEventsHeader :: MonadIO m => ProcessT m (Maybe BS.ByteString) (Maybe Header)
 decodeEventsHeader = construct $ loop decodeHeader
 
-decodeEventsEvents :: MonadIO m => Header -> ProcessT m (Maybe BS.ByteString) Event
+decodeEventsEvents :: MonadIO m => Header -> ProcessT m (Maybe BS.ByteString) (Maybe Event)
 decodeEventsEvents header = construct $ loop (decodeEvents header)
 
 
 --loop :: MonadIO m => Decoder a -> PlanT (Is (Maybe BS.ByteString)) a m ()
-loop Done {} =
+loop (Done b) =
     return ()
 
 loop (Consume k) = do
@@ -209,7 +212,7 @@ loop (Consume k) = do
         Just bs -> loop (k bs)
 
 loop (Produce a d') = do
-    yield a
+    yield (Just a)
     loop d'
 
 loop (Error _ err) =
