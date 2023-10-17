@@ -1,4 +1,6 @@
-packages: .
+packages:
+    .
+  , forks/*/*.cabal
 
 package dear-imgui
   flags: +sdl +opengl2
@@ -9,3 +11,9 @@ source-repository-package
     location: git@github.com:well-typed/eventlog-live.git
     tag: d30f4cbf7bffb2c190e43073ba7a55198fd148e5
     subdir: eventlog-machines eventlog-counters
+
+
+-- source-repository-package
+--     type: git
+--     location: https://gitea.dresselhaus.cloud/Drezil/dear-implot.hs.git
+--     tag: 29987079151199d22d23b99f9d461ccedf573b0c

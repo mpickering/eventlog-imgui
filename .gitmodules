@@ -1,0 +1,3 @@
+[submodule "forks/dear-implot.hs"]
+	path = forks/dear-implot.hs
+	url = https://gitea.dresselhaus.cloud/Drezil/dear-implot.hs.git

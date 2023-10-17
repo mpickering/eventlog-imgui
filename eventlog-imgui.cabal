@@ -32,6 +32,7 @@ executable eventlog-imgui
     build-depends:
         base >=4.14.3.0
       , dear-imgui
+      , dear-implot
       , gl
       , sdl2
       , managed
