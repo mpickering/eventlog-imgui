@@ -1,0 +1,4 @@
+packages: .
+
+package dear-imgui
+  flags: +sdl +opengl2
