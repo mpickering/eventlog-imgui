@@ -42,7 +42,7 @@ import qualified System.IO                as IO
 import GHC.Eventlog.Machines
 import GHC.RTS.Events
 
-import Data.Machine        (MachineT, ProcessT, await, repeatedly, runT_, (~>), yield, stop, runT, construct)
+import Data.Machine        (MachineT, ProcessT, await, repeatedly, runT_, (~>), yield, stop, runT, construct, taking, (<~))
 import Data.Machine.Fanout (fanout)
 
 import Foreign.C.Types (CFloat)
@@ -124,13 +124,9 @@ main = do
             ~> reorderEvents 1_000_000_000
             ~> checkOrder (\e e' -> print (e, e'))
 
-    lb <- runT (input ~> events ~> liveBytesM)
+    mainWindow (input ~> events ~> liveBytesM)
 
-    print lb
-
-    mainWindow lb
-
-mainWindow :: [Word64] -> IO ()
+mainWindow :: MachineT IO a Word64 -> IO ()
 mainWindow lb = do
   -- Initialize SDL
   initializeAll
@@ -154,17 +150,17 @@ mainWindow lb = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop (map fromIntegral lb) window
+    liftIO $ mainLoop (taking 50 <~ lb) window
 
 
-mainLoop :: [CFloat] -> Window -> IO ()
-mainLoop lb window = unlessQuit do
+mainLoop :: MachineT IO a Word64  -> Window -> IO ()
+mainLoop mach window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
   newFrame
 
-  plotLines "" lb
+  runT mach >>= plotLines "" . map fromIntegral
 
   -- Render
   glClear GL_COLOR_BUFFER_BIT
@@ -174,7 +170,7 @@ mainLoop lb window = unlessQuit do
 
   glSwapWindow window
 
-  mainLoop lb window
+  mainLoop mach window
 
   where
     -- Process the event loop
