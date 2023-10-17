@@ -2,3 +2,10 @@ packages: .
 
 package dear-imgui
   flags: +sdl +opengl2
+
+
+source-repository-package
+    type: git
+    location: git@github.com:well-typed/eventlog-live.git
+    tag: d30f4cbf7bffb2c190e43073ba7a55198fd148e5
+    subdir: eventlog-machines eventlog-counters
