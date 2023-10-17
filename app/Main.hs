@@ -19,7 +19,7 @@ import DearImGui.OpenGL2
 import DearImGui.SDL
 import DearImGui.SDL.OpenGL
 import Graphics.GL
-import SDL hiding (Event)
+import SDL hiding (Event, Error)
 
 import Control.Applicative       (optional, (<**>), (<|>))
 import Control.Concurrent.STM    (STM, atomically, readTVar)
@@ -48,6 +48,7 @@ import Data.Machine.Fanout (fanout)
 import Foreign.C.Types (CFloat)
 import System.Random (randomRIO)
 import Data.Function
+import GHC.RTS.Events.Incremental
 
 -- 'Void' output to help inference.
 fileSink :: Handle -> ProcessT IO (Maybe BS.ByteString) Void
@@ -187,3 +188,29 @@ mainLoop mach window = unlessQuit do
 
     isQuit event =
       SDL.eventPayload event == SDL.QuitEvent
+
+
+decodeEventsHeader :: MonadIO m => ProcessT m (Maybe BS.ByteString) Header
+decodeEventsHeader = construct $ loop decodeHeader
+
+decodeEventsEvents :: MonadIO m => Header -> ProcessT m (Maybe BS.ByteString) Event
+decodeEventsEvents header = construct $ loop (decodeEvents header)
+
+
+--loop :: MonadIO m => Decoder a -> PlanT (Is (Maybe BS.ByteString)) a m ()
+loop Done {} =
+    return ()
+
+loop (Consume k) = do
+    -- yield Nothing, so we keep producing ticks
+    mbs <- await
+    case mbs of
+        Nothing -> loop (Consume k)
+        Just bs -> loop (k bs)
+
+loop (Produce a d') = do
+    yield a
+    loop d'
+
+loop (Error _ err) =
+    liftIO $ throwIO $ DecodeError err
