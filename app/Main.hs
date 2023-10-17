@@ -1,6 +1,13 @@
 {-# language BlockArguments #-}
 {-# language LambdaCase #-}
 {-# language OverloadedStrings #-}
+{-# LANGUAGE ApplicativeDo      #-}
+{-# LANGUAGE BangPatterns       #-}
+{-# LANGUAGE GADTs              #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE RankNTypes         #-}
+{-# LANGUAGE RecordWildCards    #-}
 
 module Main ( main ) where
 
@@ -12,10 +19,105 @@ import DearImGui.OpenGL2
 import DearImGui.SDL
 import DearImGui.SDL.OpenGL
 import Graphics.GL
-import SDL
+import SDL hiding (Event)
 
-main :: IO ()
+import Control.Applicative       (optional, (<**>), (<|>))
+import Control.Concurrent.STM    (STM, atomically, readTVar)
+import Control.Monad.IO.Class    (liftIO)
+import Data.Foldable             (for_)
+import Data.Void                 (Void)
+import Data.Word                 (Word64)
+import System.IO                 (Handle)
+import Text.Printf               (PrintfArg, PrintfType, printf)
+
+import qualified Data.ByteString          as BS
+import qualified Data.IntSet              as IS
+import qualified Data.Map.Strict          as Map
+import qualified Data.Text                as T
+import qualified Network.Socket           as Sock
+import qualified Options.Applicative      as O
+import qualified System.IO                as IO
+--import qualified System.Remote.Monitoring
+
+import GHC.Eventlog.Machines
+import GHC.RTS.Events
+
+import Data.Machine        (MachineT, ProcessT, await, repeatedly, runT_, (~>))
+import Data.Machine.Fanout (fanout)
+
+-- 'Void' output to help inference.
+fileSink :: Handle -> ProcessT IO (Maybe BS.ByteString) Void
+fileSink hdl = repeatedly $ do
+    mbs <- await
+    liftIO $ for_ mbs $ BS.hPut hdl
+
+-------------------------------------------------------------------------------
+-- connecting & opening
+-------------------------------------------------------------------------------
+
+connectToEventlogSocket :: FilePath -> IO Handle
+connectToEventlogSocket socketName = do
+    s <- Sock.socket Sock.AF_UNIX Sock.Stream Sock.defaultProtocol
+    Sock.connect s (Sock.SockAddrUnix socketName)
+    h <- Sock.socketToHandle s IO.ReadMode
+    IO.hSetBuffering h IO.NoBuffering
+    return h
+
+openEventlogFile :: FilePath -> IO Handle
+openEventlogFile path = do
+    hdl <- IO.openFile path IO.ReadMode
+    IO.hSetBinaryMode hdl True
+    return hdl
+
+-------------------------------------------------------------------------------
+-- Options
+-------------------------------------------------------------------------------
+
+data PathType = PathTypeSocket | PathTypeFile
+  deriving Show
+
+data Opts = Opts
+    { optEventLogPath :: FilePath
+    , optPathType     :: PathType
+    }
+  deriving Show
+
+optsP :: O.Parser Opts
+optsP = do
+    optEventLogPath <- O.strArgument $
+        O.metavar "PATH" <> O.help "Eventlog path"
+    optPathType <- pathTypeP
+
+    pure Opts {..}
+  where
+    pathTypeP :: O.Parser PathType
+    pathTypeP =
+        O.flag' PathTypeSocket (O.long "unix" <> O.help "Path is to UNIX socket (default)") <|>
+        O.flag' PathTypeFile (O.long "file" <> O.help "Path is to ordinary file") <|>
+        pure PathTypeSocket
+
+
+
 main = do
+    opts <- O.execParser $ O.info (optsP <**> O.helper) $
+        O.fullDesc <> O.header "eventlog-imgui"
+
+    hdl <- case optPathType opts of
+        PathTypeSocket -> connectToEventlogSocket (optEventLogPath opts)
+        PathTypeFile   -> openEventlogFile (optEventLogPath opts)
+
+    let input :: MachineT IO k (Maybe BS.ByteString)
+        input = sourceHandleWait hdl 1_000_000 4096
+
+    let events :: ProcessT IO (Maybe BS.ByteString) Event
+        events = decodeEventsMaybe
+            ~> reorderEvents 1_000_000_000
+            ~> checkOrder (\e e' -> print (e, e'))
+
+    mainWindow
+
+mainWindow :: IO ()
+mainWindow = do
   -- Initialize SDL
   initializeAll
 

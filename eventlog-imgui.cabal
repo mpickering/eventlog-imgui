@@ -35,5 +35,14 @@ executable eventlog-imgui
       , gl
       , sdl2
       , managed
+      , eventlog-machines
+      , ghc-events
+      , machines
+      , text
+      , optparse-applicative
+      , network
+      , containers
+      , bytestring
+      , stm
     hs-source-dirs:   app
     default-language: Haskell2010
