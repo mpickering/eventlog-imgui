@@ -18,9 +18,10 @@ import DearImGui
 import DearImGui.OpenGL2
 import DearImGui.SDL
 import DearImGui.SDL.OpenGL
-import DearImGui.Plot
+import DearImGui.Plot hiding (plotLine)
+import DearImGui.Raw.Plot
 import Graphics.GL
-import SDL hiding (Event, Error)
+import SDL hiding (Event, Error, Timestamp)
 
 import Control.Applicative       (optional, (<**>), (<|>))
 import Control.Concurrent.STM    (STM, atomically, readTVar)
@@ -53,6 +54,8 @@ import GHC.RTS.Events.Incremental
 import Control.Concurrent.Chan
 import Control.Concurrent.STM.TChan
 import Control.Concurrent hiding (yield)
+import Foreign (withArrayLen)
+import Data.Text.Foreign
 
 
 -- 'Void' output to help inference.
@@ -61,11 +64,11 @@ fileSink hdl = repeatedly $ do
     mbs <- await
     liftIO $ for_ mbs $ BS.hPut hdl
 
-liveBytesM :: ProcessT IO Event Word64
+liveBytesM :: ProcessT IO Event (Timestamp, Word64)
 liveBytesM = construct $ fix $ \r -> do
-  Event _ ei _ <- await <|> stop
+  Event t ei _ <- await <|> stop
   case ei of
-    HeapLive _ lb -> yield lb >> r
+    HeapLive _ lb -> yield (t, lb) >> r
     _ -> r
 
 -------------------------------------------------------------------------------
@@ -136,7 +139,7 @@ main = do
 
     mainWindow event_chan
 
-mainWindow :: TChan Word64 -> IO ()
+mainWindow :: TChan (Timestamp, Word64) -> IO ()
 mainWindow inp = do
   -- Initialize SDL
   initializeAll
@@ -161,40 +164,46 @@ mainWindow inp = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop [] inp window
+    liftIO $ mainLoop ([], []) inp window
 
 sinkChan chan  = repeatedly $ do
-  await >>= \x -> do
-    liftIO $ print x
-    liftIO $ atomically (writeTChan chan x)
+  await >>= \(t, x) -> do
+    liftIO $ print (t, x)
+    liftIO $ atomically (writeTChan chan (t, x))
 
 
-mainLoop :: [Word64] -> TChan Word64  -> Window -> IO ()
-mainLoop existing_values event_chan window = unlessQuit do
+mainLoop :: ([CFloat], [CFloat]) -> TChan (Timestamp, Word64)  -> Window -> IO ()
+mainLoop (curTs, curVs) event_chan window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
   newFrame
 
   new_value <- atomically (tryReadTChan event_chan)
-  let new_values = case new_value of
-                      Nothing -> existing_values
-                      Just x -> existing_values ++ [x]
+  let (new_ts, new_values) = case new_value of
+                      Nothing -> (curTs, curVs)
+                      Just (t, x) -> (fromIntegral t:curTs, fromIntegral x:curVs)
 
-
-
-  plotLines "" . map fromIntegral $ new_values
   -- Render
   glClear GL_COLOR_BUFFER_BIT
 
-  showPlotDemoWindow
+  beginPlot "Live bytes"
+
+  _ <-
+    withArrayLen new_ts $
+      \l ts_ptr -> withArrayLen new_values $
+        \_ vs_ptr -> withCString "Live bytes" $
+          \label ->
+            plotLine label ts_ptr vs_ptr (fromIntegral l)
+
+  endPlot
 
   render
   openGL2RenderDrawData =<< getDrawData
 
   glSwapWindow window
 
-  mainLoop new_values event_chan window
+  mainLoop (new_ts, new_values) event_chan window
 
   where
     -- Process the event loop
