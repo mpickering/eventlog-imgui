@@ -1,10 +1,13 @@
 packages:
     .
   , forks/*/*.cabal
+  , forks/*/dear-imgui.hs
 
 package dear-imgui
   flags: +sdl +opengl2
 
+
+allow-newer: template-haskell, transformers
 
 source-repository-package
     type: git
