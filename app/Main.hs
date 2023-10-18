@@ -161,8 +161,10 @@ mainWindow inp = do
 
     liftIO $ mainLoop [] inp window
 
-sinkChan chan  = construct $ do
-  await >>= \x -> liftIO $ atomically (writeTChan chan x)
+sinkChan chan  = repeatedly $ do
+  await >>= \x -> do
+    liftIO $ print x
+    liftIO $ atomically (writeTChan chan x)
 
 
 mainLoop :: [Word64] -> TChan Word64  -> Window -> IO ()
