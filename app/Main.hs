@@ -49,6 +49,10 @@ import Foreign.C.Types (CFloat)
 import System.Random (randomRIO)
 import Data.Function
 import GHC.RTS.Events.Incremental
+import Control.Concurrent.Chan
+import Control.Concurrent.STM.TChan
+import Control.Concurrent hiding (yield)
+
 
 -- 'Void' output to help inference.
 fileSink :: Handle -> ProcessT IO (Maybe BS.ByteString) Void
@@ -120,18 +124,19 @@ main = do
     let input :: MachineT IO k (Maybe BS.ByteString)
         input = sourceHandleWait hdl 1_000_000 4096
 
-
-    Just header <- head <$> runT (input ~> decodeEventsHeader)
-
     let events :: ProcessT IO (Maybe BS.ByteString) Event
-        events = decodeEventsEvents header
+        events = decodeEventsMaybe
             ~> reorderEvents 1_000_000_000
             ~> checkOrder (\e e' -> print (e, e'))
 
-    mainWindow (input ~> events ~> liveBytesM)
+    event_chan <- newTChanIO
 
-mainWindow :: MachineT IO a Word64 -> IO ()
-mainWindow lb = do
+    forkIO $ runT_ (input ~> events ~> liveBytesM ~> sinkChan event_chan)
+
+    mainWindow event_chan
+
+mainWindow :: TChan Word64 -> IO ()
+mainWindow inp = do
   -- Initialize SDL
   initializeAll
 
@@ -154,18 +159,27 @@ mainWindow lb = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop (taking 5 <~ lb) window
+    liftIO $ mainLoop [] inp window
+
+sinkChan chan  = construct $ do
+  await >>= \x -> liftIO $ atomically (writeTChan chan x)
 
 
-mainLoop :: MachineT IO a Word64  -> Window -> IO ()
-mainLoop mach window = unlessQuit do
+mainLoop :: [Word64] -> TChan Word64  -> Window -> IO ()
+mainLoop existing_values event_chan window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
   newFrame
 
-  runT mach >>= plotLines "" . map fromIntegral
+  new_value <- atomically (tryReadTChan event_chan)
+  let new_values = case new_value of
+                      Nothing -> existing_values
+                      Just x -> existing_values ++ [x]
 
+
+
+  plotLines "" . map fromIntegral $ new_values
   -- Render
   glClear GL_COLOR_BUFFER_BIT
 
@@ -174,7 +188,7 @@ mainLoop mach window = unlessQuit do
 
   glSwapWindow window
 
-  mainLoop mach window
+  mainLoop new_values event_chan window
 
   where
     -- Process the event loop
@@ -193,27 +207,3 @@ mainLoop mach window = unlessQuit do
       SDL.eventPayload event == SDL.QuitEvent
 
 
-decodeEventsHeader :: MonadIO m => ProcessT m (Maybe BS.ByteString) (Maybe Header)
-decodeEventsHeader = construct $ loop decodeHeader
-
-decodeEventsEvents :: MonadIO m => Header -> ProcessT m (Maybe BS.ByteString) (Maybe Event)
-decodeEventsEvents header = construct $ loop (decodeEvents header)
-
-
---loop :: MonadIO m => Decoder a -> PlanT (Is (Maybe BS.ByteString)) a m ()
-loop (Done b) =
-    return ()
-
-loop (Consume k) = do
-    -- yield Nothing, so we keep producing ticks
-    mbs <- await
-    case mbs of
-        Nothing -> loop (Consume k)
-        Just bs -> loop (k bs)
-
-loop (Produce a d') = do
-    yield (Just a)
-    loop d'
-
-loop (Error _ err) =
-    liftIO $ throwIO $ DecodeError err
