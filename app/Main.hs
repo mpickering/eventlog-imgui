@@ -18,6 +18,7 @@ import DearImGui
 import DearImGui.OpenGL2
 import DearImGui.SDL
 import DearImGui.SDL.OpenGL
+import DearImGui.Plot
 import Graphics.GL
 import SDL hiding (Event, Error)
 
@@ -152,6 +153,7 @@ mainWindow inp = do
 
     -- Create an ImGui context
     _ <- managed $ bracket createContext destroyContext
+    _ <- managed $ bracket createPlotContext destroyPlotContext
 
     -- Initialize ImGui's SDL2 backend
     _ <- managed_ $ bracket_ (sdl2InitForOpenGL window glContext) sdl2Shutdown
@@ -184,6 +186,8 @@ mainLoop existing_values event_chan window = unlessQuit do
   plotLines "" . map fromIntegral $ new_values
   -- Render
   glClear GL_COLOR_BUFFER_BIT
+
+  showPlotDemoWindow
 
   render
   openGL2RenderDrawData =<< getDrawData
