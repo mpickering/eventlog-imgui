@@ -6,6 +6,7 @@
 {-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE BangPatterns    #-}
 
 module Main ( main ) where
 
@@ -226,7 +227,7 @@ mainLoop env@VisEnv{..} state window = unlessQuit do
 
   new_live_bytes <- atomically (tryReadTChan visEnvLiveBytesChan)
   let
-    new_state =
+    !new_state =
       case new_live_bytes of
         Nothing ->
           state
