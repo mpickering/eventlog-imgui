@@ -141,6 +141,8 @@ optsP = do
         O.flag' PathTypeFile (O.long "file" <> O.help "Path is to ordinary file") <|>
         pure PathTypeSocket
 
+printC = repeatedly (await >>= \x -> liftIO (print x) >> yield x)
+
 main :: IO ()
 main = do
     opts <- O.execParser $ O.info (optsP <**> O.helper) $
@@ -160,7 +162,7 @@ main = do
 
     event_chan <- newTChanIO
 
-    forkIO $ runT_ (input ~> events ~> liveBytesM ~> sinkChan event_chan)
+    forkIO $ runT_ (input ~> events ~> printC ~> liveBytesM ~> sinkChan event_chan)
 
     mainWindow event_chan
 
