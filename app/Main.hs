@@ -1,31 +1,30 @@
-{-# language BlockArguments #-}
-{-# language LambdaCase #-}
-{-# language OverloadedStrings #-}
+{-# language BlockArguments     #-}
+{-# language LambdaCase         #-}
+{-# language OverloadedStrings  #-}
 {-# LANGUAGE ApplicativeDo      #-}
-{-# LANGUAGE BangPatterns       #-}
 {-# LANGUAGE GADTs              #-}
 {-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RankNTypes         #-}
 {-# LANGUAGE RecordWildCards    #-}
 
 module Main ( main ) where
 
+import Control.Applicative
 import Control.Exception
+import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Managed
+import Data.Maybe
 import DearImGui
 import DearImGui.OpenGL2
 import DearImGui.SDL
 import DearImGui.SDL.OpenGL
-import DearImGui.Plot hiding (plotLine)
+import DearImGui.Plot hiding (plotLine, setupAxisLimits)
 import DearImGui.Raw.Plot
 import Graphics.GL
 import SDL hiding (Event, Error, Timestamp)
 
-import Control.Applicative       (optional, (<**>), (<|>))
 import Control.Concurrent.STM    (STM, atomically, readTVar)
-import Control.Monad.IO.Class    (liftIO)
 import Data.Foldable             (for_)
 import Data.Void                 (Void)
 import Data.Word                 (Word64)
@@ -56,6 +55,27 @@ import Control.Concurrent.STM.TChan
 import Control.Concurrent hiding (yield)
 import Foreign (withArrayLen)
 import Data.Text.Foreign
+import Data.IORef (newIORef)
+import DearImGui.Plot.Enums
+import Unsafe.Coerce (unsafeCoerce)
+
+newtype VisEnv =
+    VisEnv
+      { visEnvLiveBytesChan :: TChan (Timestamp, Word64)
+      }
+
+newtype VisState =
+    VisState
+      { visStateLiveBytes :: VisStateLiveBytes
+      }
+
+data VisStateLiveBytes =
+    VisStateLiveBytes
+      { visStateLiveBytesTimes :: [CFloat]
+      , visStateLiveBytesMaxTime :: CFloat
+      , visStateLiveBytesVals :: [CFloat]
+      , visStateLiveBytesMaxVal :: CFloat
+      }
 
 
 -- 'Void' output to help inference.
@@ -131,7 +151,7 @@ main = do
     let events :: ProcessT IO (Maybe BS.ByteString) Event
         events = decodeEventsMaybe
             ~> reorderEvents 1_000_000_000
-            ~> checkOrder (\e e' -> print (e, e'))
+            ~> checkOrder (curry print)
 
     event_chan <- newTChanIO
 
@@ -164,7 +184,20 @@ mainWindow inp = do
     -- Initialize ImGui's OpenGL backend
     _ <- managed_ $ bracket_ openGL2Init openGL2Shutdown
 
-    liftIO $ mainLoop ([], []) inp window
+    let
+      initVisEnv = VisEnv inp
+      initVisState =
+        VisState
+          { visStateLiveBytes =
+              VisStateLiveBytes
+                { visStateLiveBytesTimes = []
+                , visStateLiveBytesMaxTime = -1.0
+                , visStateLiveBytesVals = []
+                , visStateLiveBytesMaxVal = -1.0
+                }
+          }
+
+    liftIO $ mainLoop initVisEnv initVisState window
 
 sinkChan chan  = repeatedly $ do
   await >>= \(t, x) -> do
@@ -172,44 +205,68 @@ sinkChan chan  = repeatedly $ do
     liftIO $ atomically (writeTChan chan (t, x))
 
 
-mainLoop :: ([CFloat], [CFloat]) -> TChan (Timestamp, Word64)  -> Window -> IO ()
-mainLoop (curTs, curVs) event_chan window = unlessQuit do
+mainLoop :: VisEnv -> VisState -> Window -> IO ()
+mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
   newFrame
 
-  new_value <- atomically (tryReadTChan event_chan)
-  let (new_ts, new_values) = case new_value of
-                      Nothing -> (curTs, curVs)
-                      Just (t, x) -> (fromIntegral t:curTs, fromIntegral x:curVs)
+  new_live_bytes <- atomically (tryReadTChan visEnvLiveBytesChan)
+  let
+    new_live_bytes_state =
+      case new_live_bytes of
+        Nothing ->
+          visStateLiveBytes
+        Just (t, v) ->
+          let
+            new_t = fromIntegral t
+            new_v = fromIntegral v
+            new_max_t = max (visStateLiveBytesMaxTime visStateLiveBytes) new_t
+            new_max_v = max (visStateLiveBytesMaxVal visStateLiveBytes) new_v
+          in
+            VisStateLiveBytes
+              { visStateLiveBytesTimes = new_t : visStateLiveBytesTimes visStateLiveBytes
+              , visStateLiveBytesMaxTime = new_max_t
+              , visStateLiveBytesVals = new_v : visStateLiveBytesVals visStateLiveBytes
+              , visStateLiveBytesMaxVal = new_max_v
+              }
 
   -- Render
   glClear GL_COLOR_BUFFER_BIT
 
-  beginPlot "Live bytes"
+  pos <- newIORef (ImVec2 50 50)
+  centered <- newIORef (ImVec2 0.5 0.5)
+  size <- newIORef (ImVec2 600 750)
 
-  _ <-
-    withArrayLen new_ts $
-      \l ts_ptr -> withArrayLen new_values $
-        \_ vs_ptr -> withCString "Live bytes" $
-          \label ->
-            plotLine label ts_ptr vs_ptr (fromIntegral l)
+  setNextWindowPos pos ImGuiCond_Appearing Nothing
+  setNextWindowSize size ImGuiCond_Appearing
 
-  endPlot
+  bracket_ (begin "Heap usage") end $ do
+    when (isJust new_live_bytes) setNextAxesToFit
+    unless (nullLiveBytes new_live_bytes_state) $ do
+      success <- beginPlot "Live bytes"
+      when success $ do
+        _ <-
+          withArrayLen (visStateLiveBytesTimes new_live_bytes_state) $
+            \l ts_ptr -> withArrayLen (visStateLiveBytesVals new_live_bytes_state) $
+              \_ vs_ptr -> withCString "Live bytes" $
+                \label -> plotLine label ts_ptr vs_ptr (fromIntegral l)
+
+        endPlot
 
   render
   openGL2RenderDrawData =<< getDrawData
 
   glSwapWindow window
 
-  mainLoop (new_ts, new_values) event_chan window
+  mainLoop env state{ visStateLiveBytes = new_live_bytes_state } window
 
   where
     -- Process the event loop
     unlessQuit action = do
       shouldQuit <- checkEvents
-      if shouldQuit then pure () else action
+      unless shouldQuit action
 
     checkEvents = do
       pollEventWithImGui >>= \case
@@ -221,4 +278,5 @@ mainLoop (curTs, curVs) event_chan window = unlessQuit do
     isQuit event =
       SDL.eventPayload event == SDL.QuitEvent
 
-
+    nullLiveBytes :: VisStateLiveBytes -> Bool
+    nullLiveBytes = null . visStateLiveBytesTimes
