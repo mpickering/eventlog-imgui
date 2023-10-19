@@ -56,7 +56,6 @@ import Control.Concurrent hiding (yield)
 import Foreign (withArrayLen)
 import Data.Text.Foreign
 import Data.IORef (newIORef)
-import Unsafe.Coerce (unsafeCoerce)
 
 newtype VisEnv =
     VisEnv
