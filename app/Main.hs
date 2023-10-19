@@ -60,21 +60,23 @@ import Unsafe.Coerce (unsafeCoerce)
 
 newtype VisEnv =
     VisEnv
-      { visEnvLiveBytesChan :: TChan (Timestamp, Word64)
+      { visEnvLiveBytesChan :: TChan EventEvent
       }
 
-newtype VisState =
+data VisState =
     VisState
-      { visStateLiveBytes :: VisStateLiveBytes
+      { visStateLiveBytes :: TimeSeries
+      , visStateBlocksSize  :: TimeSeries
+      , visStateHeapSize :: TimeSeries
       }
 
-data VisStateLiveBytes =
-    VisStateLiveBytes
-      { visStateLiveBytesTimes :: [CFloat]
-      , visStateLiveBytesMaxTime :: CFloat
-      , visStateLiveBytesVals :: [CFloat]
-      , visStateLiveBytesMaxVal :: CFloat
+data TimeSeries =
+    TimeSeries
+      { timeSeriesTimes :: [CFloat]
+      , timeSeriesVals :: [CFloat]
       }
+
+emptyTimeSeries = TimeSeries [] []
 
 
 -- 'Void' output to help inference.
@@ -83,12 +85,17 @@ fileSink hdl = repeatedly $ do
     mbs <- await
     liftIO $ for_ mbs $ BS.hPut hdl
 
-liveBytesM :: ProcessT IO Event (Timestamp, Word64)
+liveBytesM :: ProcessT IO Event EventEvent
 liveBytesM = construct $ fix $ \r -> do
   Event t ei _ <- await <|> stop
   case ei of
-    HeapLive _ lb -> yield (t, lb) >> r
+    HeapLive _ lb -> yield (H (t, lb)) >> r
+    BlocksSize _ lb -> yield (B (t, lb)) >> r
+    HeapSize _ lb -> yield (M (t, lb)) >> r
+
     _ -> r
+
+data EventEvent = H (Word64, Word64) | B (Word64, Word64) | M (Word64, Word64) deriving (Show)
 
 -------------------------------------------------------------------------------
 -- connecting & opening
@@ -158,7 +165,7 @@ main = do
 
     mainWindow event_chan
 
-mainWindow :: TChan (Timestamp, Word64) -> IO ()
+mainWindow :: TChan EventEvent -> IO ()
 mainWindow inp = do
   -- Initialize SDL
   initializeAll
@@ -187,25 +194,30 @@ mainWindow inp = do
       initVisEnv = VisEnv inp
       initVisState =
         VisState
-          { visStateLiveBytes =
-              VisStateLiveBytes
-                { visStateLiveBytesTimes = []
-                , visStateLiveBytesMaxTime = -1.0
-                , visStateLiveBytesVals = []
-                , visStateLiveBytesMaxVal = -1.0
-                }
+          { visStateLiveBytes = emptyTimeSeries
+          , visStateBlocksSize = emptyTimeSeries
+          , visStateHeapSize = emptyTimeSeries
           }
 
     liftIO $ mainLoop initVisEnv initVisState window
 
 sinkChan chan  = repeatedly $ do
-  await >>= \(t, x) -> do
-    liftIO $ print (t, x)
-    liftIO $ atomically (writeTChan chan (t, x))
+  await >>= \e -> do
+    liftIO $ print e
+    liftIO $ atomically (writeTChan chan e)
 
+updateTimeSeries ts (t, v) =
+          let
+            new_t = fromIntegral t
+            new_v = fromIntegral v
+          in
+            TimeSeries
+              { timeSeriesTimes = new_t : timeSeriesTimes ts
+              , timeSeriesVals = new_v : timeSeriesVals ts
+              }
 
 mainLoop :: VisEnv -> VisState -> Window -> IO ()
-mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
+mainLoop env@VisEnv{..} state window = unlessQuit do
   -- Tell ImGui we're starting a new frame
   openGL2NewFrame
   sdl2NewFrame
@@ -213,23 +225,17 @@ mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
 
   new_live_bytes <- atomically (tryReadTChan visEnvLiveBytesChan)
   let
-    new_live_bytes_state =
+    new_state =
       case new_live_bytes of
         Nothing ->
-          visStateLiveBytes
-        Just (t, v) ->
-          let
-            new_t = fromIntegral t
-            new_v = fromIntegral v
-            new_max_t = max (visStateLiveBytesMaxTime visStateLiveBytes) new_t
-            new_max_v = max (visStateLiveBytesMaxVal visStateLiveBytes) new_v
-          in
-            VisStateLiveBytes
-              { visStateLiveBytesTimes = new_t : visStateLiveBytesTimes visStateLiveBytes
-              , visStateLiveBytesMaxTime = new_max_t
-              , visStateLiveBytesVals = new_v : visStateLiveBytesVals visStateLiveBytes
-              , visStateLiveBytesMaxVal = new_max_v
-              }
+          state
+        Just (H tv) ->
+          state { visStateLiveBytes = updateTimeSeries (visStateLiveBytes state) tv }
+        Just (B tv) ->
+          state { visStateBlocksSize = updateTimeSeries (visStateBlocksSize state) tv }
+        Just (M tv) ->
+          state { visStateHeapSize = updateTimeSeries (visStateHeapSize state) tv }
+
 
   -- Render
   glClear GL_COLOR_BUFFER_BIT
@@ -241,16 +247,20 @@ mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
   setNextWindowPos pos ImGuiCond_Appearing Nothing
   setNextWindowSize size ImGuiCond_Appearing
 
+  let series label ts =
+          withArrayLen (timeSeriesTimes ts) $
+            \l ts_ptr -> withArrayLen (timeSeriesVals ts) $
+              \_ vs_ptr -> withCString label $
+                \label -> plotLine label ts_ptr vs_ptr (fromIntegral l)
+
   bracket_ (begin "Heap usage") end $ do
     when (isJust new_live_bytes) setNextAxesToFit
-    unless (nullLiveBytes new_live_bytes_state) $ do
+    do
       success <- beginPlot "Live bytes"
       when success $ do
-        _ <-
-          withArrayLen (visStateLiveBytesTimes new_live_bytes_state) $
-            \l ts_ptr -> withArrayLen (visStateLiveBytesVals new_live_bytes_state) $
-              \_ vs_ptr -> withCString "Live bytes" $
-                \label -> plotLine label ts_ptr vs_ptr (fromIntegral l)
+        series "Live Bytes" (visStateLiveBytes new_state)
+        series "Blocks Size" (visStateBlocksSize new_state)
+        series "Heap Size" (visStateHeapSize new_state)
 
         endPlot
 
@@ -259,7 +269,7 @@ mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
 
   glSwapWindow window
 
-  mainLoop env state{ visStateLiveBytes = new_live_bytes_state } window
+  mainLoop env new_state window
 
   where
     -- Process the event loop
@@ -277,5 +287,3 @@ mainLoop env@VisEnv{..} state@VisState{..} window = unlessQuit do
     isQuit event =
       SDL.eventPayload event == SDL.QuitEvent
 
-    nullLiveBytes :: VisStateLiveBytes -> Bool
-    nullLiveBytes = null . visStateLiveBytesTimes
